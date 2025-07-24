@@ -170,7 +170,7 @@ def create_dataset_yaml(output_path, class_names, use_split, images_dir):
     return yaml_path
 
 
-def coco_to_yolo_converter(json_path, images_dir, output_dir, use_split=True, 
+def coco_to_yolo_converter(json_path, images_dir, output_dir, use_split=False, 
                           train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, seed=42, verbose=True):
     """
     Convert COCO JSON annotations to YOLO format with optional train-test splitting.
