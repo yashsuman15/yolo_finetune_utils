@@ -124,3 +124,13 @@ def extract_random_frames(
         cap.release()
 
     print(f"[✓] Extracted {extracted} frames to folder: {out_dir}")
+    
+# if __name__ == "__main__":
+#     # Example usage
+#     extract_random_frames(
+#         paths=[r"Traffic\assests\3.mp4"],
+#         total_images=20,
+#         out_dir="frames_output",
+#         jpg_quality=100,
+#         seed=42
+#     )
