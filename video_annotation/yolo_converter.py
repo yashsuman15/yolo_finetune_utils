@@ -3,10 +3,142 @@ import os
 import cv2
 import yaml
 import random
+import urllib.request
+import ssl
 from tqdm import tqdm
 import math
 
-def convert_to_yolo_segmentation(annotation_path, videos_dir, use_split=True, split_ratio=(0.7, 0.2, 0.1), output_dir="yolo_seg_dataset"):
+def download_and_merge_annotations(manifest_path, output_path="merged_annotations.json"):
+    """
+    Downloads per-file annotation JSONs from a Labellerr export manifest
+    and merges them into a single flat JSON array file.
+
+    The new Labellerr export format provides a manifest JSON containing
+    `file_exports` with signed `download_url`s for each annotated file.
+    This function downloads each one, merges them, and writes the result
+    to a single JSON file compatible with the existing converter functions.
+
+    Args:
+        manifest_path (str): Path to the Labellerr export manifest JSON file.
+        output_path (str): Path where the merged annotation JSON will be saved.
+
+    Returns:
+        str: The path to the merged annotation file. If the input is already
+             in flat format (no `file_exports` key), it returns the original path.
+    """
+    print(f"Loading manifest from: {manifest_path}")
+    with open(manifest_path, 'r') as f:
+        manifest = json.load(f)
+
+    # --- Auto-detect format ---
+    # If it's already a flat list (old format), skip downloading
+    if isinstance(manifest, list):
+        print("Input is already a flat annotation list (old format). No download needed.")
+        return manifest_path
+
+    if "file_exports" not in manifest:
+        print("Warning: JSON is a dict but has no 'file_exports' key. Returning as-is.")
+        return manifest_path
+
+    file_exports = manifest["file_exports"]
+    print(f"Found {len(file_exports)} file export(s) in manifest.")
+
+    # Allow unverified SSL for signed GCS URLs if needed
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    merged = []
+    for export in tqdm(file_exports, desc="Downloading annotation files"):
+        file_name = export.get("file_name", "unknown")
+        download_url = export.get("download_url")
+
+        if not download_url:
+            print(f"  Warning: No download_url for '{file_name}'. Skipping.")
+            continue
+
+        try:
+            req = urllib.request.Request(download_url)
+            response = urllib.request.urlopen(req, context=ctx)
+            content = response.read().decode('utf-8')
+            annotation_data = json.loads(content)
+
+            # The downloaded JSON could be a single dict or a list of dicts
+            if isinstance(annotation_data, list):
+                merged.extend(annotation_data)
+            else:
+                merged.append(annotation_data)
+
+            print(f"  ✓ Downloaded annotations for: {file_name}")
+        except urllib.error.HTTPError as e:
+            print(f"  ✗ HTTP Error downloading '{file_name}': {e.code} {e.reason}")
+        except urllib.error.URLError as e:
+            print(f"  ✗ URL Error downloading '{file_name}': {e.reason}")
+        except Exception as e:
+            print(f"  ✗ Error downloading '{file_name}': {e}")
+
+    if not merged:
+        print("Error: No annotations were downloaded. Check the download URLs (they may have expired).")
+        return None
+
+    # Save merged annotations
+    with open(output_path, 'w') as f:
+        json.dump(merged, f, indent=2)
+
+    print(f"\nMerged {len(merged)} annotation(s) into: {os.path.abspath(output_path)}")
+    return output_path
+
+
+def convert_from_manifest(
+    manifest_path,
+    videos_dir,
+    task="segmentation",
+    use_split=True,
+    split_ratio=(0.7, 0.2, 0.1),
+    output_dir="model_dataset",
+    merged_annotations_path="merged_annotations.json"
+):
+    """
+    Convenience wrapper: downloads annotations from a Labellerr manifest,
+    merges them, and runs the appropriate YOLO converter.
+
+    Args:
+        manifest_path (str): Path to the Labellerr export manifest JSON.
+        videos_dir (str): Path to the directory containing video files.
+        task (str): Either 'segmentation' or 'bbox'.
+        use_split (bool): Whether to split into train/val/test.
+        split_ratio (tuple): Split ratios (train, val, test).
+        output_dir (str): Output dataset directory.
+        merged_annotations_path (str): Where to save the merged annotation JSON.
+    """
+    # Step 1: Download & merge
+    annotation_path = download_and_merge_annotations(manifest_path, merged_annotations_path)
+    if annotation_path is None:
+        print("Aborting conversion — no annotations available.")
+        return
+
+    # Step 2: Convert
+    if task == "segmentation":
+        convert_to_yolo_segmentation(
+            annotation_path=annotation_path,
+            videos_dir=videos_dir,
+            use_split=use_split,
+            split_ratio=split_ratio,
+            output_dir=output_dir
+        )
+    elif task == "bbox":
+        convert_to_yolo_bbox(
+            annotation_path=annotation_path,
+            videos_dir=videos_dir,
+            use_split=use_split,
+            split_ratio=split_ratio,
+            output_dir=output_dir
+        )
+    else:
+        print(f"Error: Unknown task '{task}'. Use 'segmentation' or 'bbox'.")
+
+
+def convert_to_yolo_segmentation(annotation_path, videos_dir, use_split=True, split_ratio=(0.7, 0.2, 0.1), output_dir="model_seg_dataset"):
     """
     Converts a JSON annotation file to the YOLO segmentation format.
 
@@ -181,7 +313,7 @@ def convert_to_yolo_segmentation(annotation_path, videos_dir, use_split=True, sp
     print(f"YAML file saved to: {os.path.abspath(yaml_path)}")
     
     
-def convert_to_yolo_bbox(annotation_path, videos_dir, use_split=True, split_ratio=(0.7, 0.2, 0.1), output_dir="yolo_bbox_dataset"):
+def convert_to_yolo_bbox(annotation_path, videos_dir, use_split=True, split_ratio=(0.7, 0.2, 0.1), output_dir="model_bbox_dataset"):
     """
     Converts a JSON annotation file with bounding boxes to the YOLO detection format.
 
@@ -370,9 +502,6 @@ def convert_to_yolo_bbox(annotation_path, videos_dir, use_split=True, split_rati
 
 # --- Example of how to run the function ---
 if __name__ == '__main__':
-    # Define the paths based on your file structure
-    SEG_ANNOTATION_FILE = "annotations_polygon.json"
-    BBOX_ANNOTATION_FILE = "annotations_bbox.json"
     VIDEOS_DIRECTORY = "videos"
     OUTPUT_DATASET_DIR = "dataset_final"
 
@@ -380,23 +509,39 @@ if __name__ == '__main__':
     if not os.path.exists(VIDEOS_DIRECTORY):
         os.makedirs(VIDEOS_DIRECTORY)
         print(f"Created '{VIDEOS_DIRECTORY}' directory. Please add your video files there.")
-        # You might want to exit here if videos are required for a real run
-        # exit() 
 
-    # Call the function with a custom split ratio
-    convert_to_yolo_segmentation(
-        annotation_path=SEG_ANNOTATION_FILE,
+    # ========================================================
+    # Option A: NEW WORKFLOW — Use the Labellerr export manifest
+    # (the manifest contains download_urls for each file's annotations)
+    # ========================================================
+    MANIFEST_FILE = "annotation.json"
+
+    convert_from_manifest(
+        manifest_path=MANIFEST_FILE,
         videos_dir=VIDEOS_DIRECTORY,
+        task="bbox",                   # or "segmentation"
         use_split=True,
-        split_ratio=(0.7, 0.2, 0.1),  # 70% train, 20% val, 10% test
-        output_dir=OUTPUT_DATASET_DIR
+        split_ratio=(0.7, 0.2, 0.1),
+        output_dir=OUTPUT_DATASET_DIR,
+        merged_annotations_path="merged_annotations.json",
     )
-    
-    # Call the function with a custom split ratio
-    convert_to_yolo_bbox(
-        annotation_path=BBOX_ANNOTATION_FILE,
-        videos_dir=VIDEOS_DIRECTORY,
-        use_split=True,
-        split_ratio=(0.7, 0.2, 0.1),  # 70% train, 20% val, 10% test
-        output_dir=OUTPUT_DATASET_DIR
-    )
+
+    # ========================================================
+    # Option B: OLD WORKFLOW — Use a flat annotation JSON directly
+    # (if you already have the merged/flat annotations file)
+    # ========================================================
+    # convert_to_yolo_segmentation(
+    #     annotation_path="annotations_polygon.json",
+    #     videos_dir=VIDEOS_DIRECTORY,
+    #     use_split=True,
+    #     split_ratio=(0.7, 0.2, 0.1),
+    #     output_dir=OUTPUT_DATASET_DIR
+    # )
+    #
+    # convert_to_yolo_bbox(
+    #     annotation_path="annotations_bbox.json",
+    #     videos_dir=VIDEOS_DIRECTORY,
+    #     use_split=True,
+    #     split_ratio=(0.7, 0.2, 0.1),
+    #     output_dir=OUTPUT_DATASET_DIR
+    # )
